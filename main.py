@@ -8,20 +8,23 @@ import socket
 import urllib.request
 import webbrowser
 import json
-import re
+import ipaddress
 from src.interceptor import InterceptorWorker
 
 class SBSApp:
     def __init__(self, root):
         self.root = root
         self.root.title("SBS (Side-by-Side) - Enterprise Intrusion Detection System")
-        self.root.geometry("1000x650")
-        
+        self.root.geometry("1100x700")  # sedikit lebih besar untuk tabel tambahan
+
         self.stats = {"HACKER": 0, "RANSOMWARE": 0, "VIRUS": 0, "SUSPICIOUS": 0, "MALWARE": 0, "TROJAN": 0}
         self.worker_thread = None
         self.log_queue = queue.Queue()
         self.selected_ip = None
-        
+
+        # Daftar IP yang diisolasi / diblokir (disimpan sebagai dictionary)
+        self.blocked_ips = {}  # {ip: {"type": "isolate"|"block", "rule_name": str, "time": str}}
+
         self.init_ui()
         self.poll_log_queue()
 
@@ -45,7 +48,7 @@ class SBSApp:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill='both', expand=True, padx=10, pady=5)
 
-        # TAB 1
+        # TAB 1: Live Monitor
         self.tab1 = tk.Frame(self.notebook, bg='#0F172A')
         self.notebook.add(self.tab1, text=" 🖥️ Live Monitor & Analytics ")
         tk.Label(self.tab1, text="Live Traffic Logs:", bg='#0F172A', fg='#38BDF8', font=('Arial', 10, 'bold')).pack(anchor='w', padx=10, pady=5)
@@ -57,7 +60,7 @@ class SBSApp:
         self.analytics_monitor.config(state='disabled')
         self.analytics_monitor.pack(fill='x', padx=10, pady=5)
 
-        # TAB 2
+        # TAB 2: Graphical Dashboard
         self.tab2 = tk.Frame(self.notebook, bg='#0F172A')
         self.notebook.add(self.tab2, text=" 📊 Graphical Dashboard ")
         tk.Label(self.tab2, text="Visualisasi Kuantitas Frekuensi Ancaman Siber", bg='#0F172A', fg='#38BDF8', font=('Arial', 11, 'bold')).pack(pady=10)
@@ -65,46 +68,53 @@ class SBSApp:
         self.canvas.pack(fill='both', expand=True, padx=20, pady=10)
         self.canvas.bind("<Configure>", lambda e: self.update_charts())
 
-        # TAB 3
+        # TAB 3: Tabular Forensic Database
         self.tab3 = tk.Frame(self.notebook, bg='#0F172A')
         self.notebook.add(self.tab3, text=" 📋 Tabular Forensic Database ")
-        
-        self.log_table = ttk.Treeview(self.tab3, columns=("Waktu", "IP", "Port", "Kategori", "Rekomendasi"), show='headings')
+
+        # Tabel log forensik
+        self.log_table = ttk.Treeview(self.tab3, columns=("Waktu", "IP", "Port", "Kategori", "Rekomendasi"), show='headings', height=8)
         self.log_table.heading("Waktu", text="Waktu Kejadian")
         self.log_table.heading("IP", text="IP Penyerang")
         self.log_table.heading("Port", text="Port Target")
         self.log_table.heading("Kategori", text="Klasifikasi Kategori")
         self.log_table.heading("Rekomendasi", text="Rekomendasi Tindakan (Then-What)")
-        
         self.log_table.column("Waktu", width=140)
         self.log_table.column("IP", width=120)
         self.log_table.column("Port", width=80)
         self.log_table.column("Kategori", width=180)
         self.log_table.column("Rekomendasi", width=250)
-        
         self.log_table.pack(fill='both', expand=True, padx=10, pady=5)
         self.log_table.bind("<<TreeviewSelect>>", self.on_table_select)
 
         # ACTION PANEL
         self.action_panel = tk.Frame(self.tab3, bg='#0B0F19')
-        self.action_panel.pack(fill='x', padx=10, pady=10)
-        
+        self.action_panel.pack(fill='x', padx=10, pady=5)
         tk.Label(self.action_panel, text="⚡ ACTION CENTER:", bg='#0B0F19', fg='#38BDF8', font=('Arial', 10, 'bold')).pack(side='left', padx=5)
-        
+
         self.btn_isolate = tk.Button(self.action_panel, text="🔒 ISOLATE", bg='#DC2626', fg='white', font=('Arial', 9, 'bold'), relief='flat', padx=10, state='disabled', command=self.action_isolate)
         self.btn_isolate.pack(side='left', padx=5)
-        
         self.btn_release = tk.Button(self.action_panel, text="🔓 RELEASE", bg='#F59E0B', fg='white', font=('Arial', 9, 'bold'), relief='flat', padx=10, state='disabled', command=self.action_release)
         self.btn_release.pack(side='left', padx=5)
-
         self.btn_check = tk.Button(self.action_panel, text="🔍 CHECK", bg='#0284C7', fg='white', font=('Arial', 9, 'bold'), relief='flat', padx=10, state='disabled', command=self.action_check)
         self.btn_check.pack(side='left', padx=5)
-
         self.btn_block = tk.Button(self.action_panel, text="🚫 BLOCK", bg='#EF4444', fg='white', font=('Arial', 9, 'bold'), relief='flat', padx=10, state='disabled', command=self.action_block)
         self.btn_block.pack(side='left', padx=5)
-
         self.btn_unblock = tk.Button(self.action_panel, text="✅ UNBLOCK", bg='#10B981', fg='white', font=('Arial', 9, 'bold'), relief='flat', padx=10, state='disabled', command=self.action_unblock)
         self.btn_unblock.pack(side='left', padx=5)
+
+        # TABEL ISOLATE/BLOCK
+        tk.Label(self.tab3, text="📌 Daftar Isolasi / Blokir Aktif:", bg='#0F172A', fg='#F59E0B', font=('Arial', 10, 'bold')).pack(anchor='w', padx=10, pady=5)
+        self.block_table = ttk.Treeview(self.tab3, columns=("IP", "Tipe", "Waktu", "Rule"), show='headings', height=5)
+        self.block_table.heading("IP", text="IP Address")
+        self.block_table.heading("Tipe", text="Tipe (Isolate/Block)")
+        self.block_table.heading("Waktu", text="Waktu Aksi")
+        self.block_table.heading("Rule", text="Rule Name")
+        self.block_table.column("IP", width=150)
+        self.block_table.column("Tipe", width=100)
+        self.block_table.column("Waktu", width=150)
+        self.block_table.column("Rule", width=250)
+        self.block_table.pack(fill='x', padx=10, pady=5)
 
         # BUTTON PANEL BAWAH
         self.btn_frame = tk.Frame(self.root, bg='#0B0F19')
@@ -115,16 +125,18 @@ class SBSApp:
         self.btn_stop.pack(side='right', fill='x', expand=True, padx=5)
 
     def _is_valid_ip(self, ip):
-        """Validasi format IP sederhana"""
-        pattern = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
-        return re.match(pattern, ip) is not None
+        """Validasi IP, mendukung IPv4 dan IPv6"""
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except ValueError:
+            return False
 
-    # ================= ACTION FUNCTIONS =================
     def on_table_select(self, event):
         selected = self.log_table.selection()
         if selected:
             values = self.log_table.item(selected[0], 'values')
-            self.selected_ip = values[1]  # IP
+            self.selected_ip = values[1]
             self.btn_isolate.config(state='normal')
             self.btn_release.config(state='normal')
             self.btn_check.config(state='normal')
@@ -136,7 +148,6 @@ class SBSApp:
                 btn.config(state='disabled')
 
     def _run_command(self, cmd):
-        """Jalankan perintah sistem dan kembalikan output/error"""
         try:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             output = result.stdout + result.stderr
@@ -148,16 +159,14 @@ class SBSApp:
         if not self.selected_ip:
             return
         ip = self.selected_ip
-        
         self.analytics_monitor.config(state='normal')
         self.analytics_monitor.delete('1.0', 'end')
         self.analytics_monitor.insert('1.0', f"⏳ [CHECK] Menganalisis IP {ip}...")
         self.analytics_monitor.config(state='disabled')
-        
+
         def worker():
             is_local = ip.startswith("127.") or ip == "localhost" or ip.startswith("192.168.") or ip.startswith("10.")
             result = f"🔍 [CHECK RESULT] IP: {ip}\n"
-            
             if is_local:
                 result += "   ⚠️ IP ini adalah IP Lokal (Localhost/Internal).\n"
                 result += "   Database eksternal tidak memiliki data untuk IP lokal.\n"
@@ -168,7 +177,7 @@ class SBSApp:
                     result += f"   Hostname: {hostname}\n"
                 except:
                     result += "   Hostname: Tidak ditemukan\n"
-                
+
                 info = {}
                 try:
                     url = f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,as"
@@ -179,7 +188,7 @@ class SBSApp:
                         info = data
                 except Exception as e:
                     info['error'] = str(e)
-                
+
                 if info and 'status' in info and info['status'] == 'success':
                     if 'country' in info:
                         result += f"   Lokasi: {info['city']}, {info['regionName']}, {info['country']}\n"
@@ -191,10 +200,9 @@ class SBSApp:
                         result += f"   ASN: {info['as']}\n"
                 else:
                     result += "   Info publik tidak tersedia.\n"
-            
+
             result += "\n🌐 Membuka AbuseIPDB di browser...\n"
             webbrowser.open(f"https://www.abuseipdb.com/check/{ip}")
-            
             self.root.after(0, self._update_analytics, result)
             self.root.after(0, self._log_action, f"[CHECK] Selesai untuk IP {ip}")
 
@@ -203,42 +211,78 @@ class SBSApp:
     def action_isolate(self):
         ip = self.selected_ip
         if not ip or not self._is_valid_ip(ip):
+            self._update_analytics("❌ IP tidak valid.")
             return
         rule_name = f"SBS_ISOLATE_{ip}"
         cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
         output = self._run_command(cmd)
-        self._log_action(f"🔒 [ISOLATE] IP {ip} => {output}")
-        self._update_analytics(f"🔒 [ISOLATE] IP {ip} berhasil diisolasi.\n{output}")
+        if "OK" in output or "Ok." in output:
+            self.blocked_ips[ip] = {"type": "isolate", "rule_name": rule_name, "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            self.update_block_table()
+            self._log_action(f"🔒 [ISOLATE] IP {ip} berhasil diisolasi.")
+            self._update_analytics(f"🔒 [ISOLATE] IP {ip} berhasil diisolasi.\n{output}")
+        else:
+            self._update_analytics(f"❌ [ISOLATE] Gagal: {output}")
 
     def action_release(self):
         ip = self.selected_ip
         if not ip or not self._is_valid_ip(ip):
             return
-        rule_name = f"SBS_ISOLATE_{ip}"
+        if ip not in self.blocked_ips or self.blocked_ips[ip]["type"] != "isolate":
+            self._update_analytics("⚠️ IP ini tidak sedang di-isolate.")
+            return
+        rule_name = self.blocked_ips[ip]["rule_name"]
         cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
         output = self._run_command(cmd)
-        self._log_action(f"🔓 [RELEASE] IP {ip} => {output}")
-        self._update_analytics(f"🔓 [RELEASE] Isolasi IP {ip} dilepas.\n{output}")
+        if "OK" in output or "Ok." in output or "No rules match" in output:
+            del self.blocked_ips[ip]
+            self.update_block_table()
+            self._log_action(f"🔓 [RELEASE] IP {ip} dilepas dari isolasi.")
+            self._update_analytics(f"🔓 [RELEASE] IP {ip} dilepas.\n{output}")
+        else:
+            self._update_analytics(f"❌ [RELEASE] Gagal: {output}")
 
     def action_block(self):
         ip = self.selected_ip
         if not ip or not self._is_valid_ip(ip):
+            self._update_analytics("❌ IP tidak valid.")
             return
         rule_name = f"SBS_BLOCK_{ip}"
         cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
         output = self._run_command(cmd)
-        self._log_action(f"🚫 [BLOCK] IP {ip} => {output}")
-        self._update_analytics(f"🚫 [BLOCK] IP {ip} diblokir permanen di firewall.\n{output}")
+        if "OK" in output or "Ok." in output:
+            self.blocked_ips[ip] = {"type": "block", "rule_name": rule_name, "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            self.update_block_table()
+            self._log_action(f"🚫 [BLOCK] IP {ip} berhasil diblokir permanen.")
+            self._update_analytics(f"🚫 [BLOCK] IP {ip} diblokir.\n{output}")
+        else:
+            self._update_analytics(f"❌ [BLOCK] Gagal: {output}")
 
     def action_unblock(self):
         ip = self.selected_ip
         if not ip or not self._is_valid_ip(ip):
             return
-        rule_name = f"SBS_BLOCK_{ip}"
+        if ip not in self.blocked_ips or self.blocked_ips[ip]["type"] != "block":
+            self._update_analytics("⚠️ IP ini tidak sedang diblokir.")
+            return
+        rule_name = self.blocked_ips[ip]["rule_name"]
         cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
         output = self._run_command(cmd)
-        self._log_action(f"✅ [UNBLOCK] IP {ip} => {output}")
-        self._update_analytics(f"✅ [UNBLOCK] Blokir IP {ip} dihapus.\n{output}")
+        if "OK" in output or "Ok." in output or "No rules match" in output:
+            del self.blocked_ips[ip]
+            self.update_block_table()
+            self._log_action(f"✅ [UNBLOCK] IP {ip} dibuka dari blokir.")
+            self._update_analytics(f"✅ [UNBLOCK] IP {ip} di-unblock.\n{output}")
+        else:
+            self._update_analytics(f"❌ [UNBLOCK] Gagal: {output}")
+
+    def update_block_table(self):
+        # Bersihkan tabel
+        for item in self.block_table.get_children():
+            self.block_table.delete(item)
+        # Tambahkan entri
+        for ip, data in self.blocked_ips.items():
+            self.block_table.insert("", "end", values=(ip, data["type"], data["time"], data["rule_name"]))
 
     def _update_analytics(self, text):
         self.analytics_monitor.config(state='normal')
@@ -250,7 +294,6 @@ class SBSApp:
         self.log_monitor.insert('end', f"[ACTION] {text}\n")
         self.log_monitor.see('end')
 
-    # ================= CORE HONEYPOT LOGIC =================
     def poll_log_queue(self):
         try:
             while True:
@@ -263,25 +306,25 @@ class SBSApp:
     def append_log(self, text):
         self.log_monitor.insert('end', text + "\n")
         self.log_monitor.see('end')
-        
+
         if "⚠️ [ALERT]" in text:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try:
                 cleaned_text = text.replace("⚠️ [ALERT] ", "")
-                
+
                 cat_part = "SUSPICIOUS"
                 if "RANSOMWARE" in cleaned_text: cat_part = "RANSOMWARE"
                 elif "HACKER" in cleaned_text: cat_part = "HACKER"
                 elif "VIRUS" in cleaned_text: cat_part = "VIRUS"
                 elif "MALWARE" in cleaned_text: cat_part = "MALWARE"
                 elif "TROJAN" in cleaned_text: cat_part = "TROJAN"
-                
+
                 ip_part = cleaned_text.split("Dari IP:")[1].split("mengetuk Port:")[0].strip()
                 port_part = cleaned_text.split("mengetuk Port:")[1].split("->")[0].strip()
-                
+
                 rekomendasi = self.execute_predictive_analytics(cat_part, ip_part, port_part)
                 self.log_table.insert("", "end", values=(timestamp, ip_part, port_part, cat_part, rekomendasi))
-                
+
                 if cat_part not in self.stats:
                     self.stats[cat_part] = 0
                 self.stats[cat_part] += 1
@@ -311,7 +354,7 @@ class SBSApp:
             analysis = (f"[{timestamp}] 🧠 [WHAT-IF]: Aktivitas pemindaian port acak dari {ip}.\n"
                         f"🛡️ [THEN-WHAT]: Aktifkan Silent Drop untuk membuang paket pencarian secara otomatis!")
             rekomendasi = "Aktifkan Silent Drop!"
-        
+
         self.analytics_monitor.config(state='normal')
         self.analytics_monitor.delete('1.0', 'end')
         self.analytics_monitor.insert('1.0', analysis)
@@ -323,14 +366,14 @@ class SBSApp:
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         if w < 10 or h < 10: return
-        
+
         categories = ["HACKER", "RANSOMWARE", "VIRUS", "MALWARE", "TROJAN", "SUSPICIOUS"]
         colors = ["#38BDF8", "#EF4444", "#F59E0B", "#A855F7", "#F97316", "#10B981"]
         max_val = max(max(self.stats.values()), 1)
         bar_count = len(categories)
         graph_height = h - 80
         bar_width = (w - 100) // bar_count
-        
+
         for i, cat in enumerate(categories):
             val = self.stats.get(cat, 0)
             bar_h = (val / max_val) * (graph_height - 40)
