@@ -20,13 +20,91 @@ class SBSHoneypot:
         ]
 
     def process_packet(self, packet):
+        """
+        Memproses paket jaringan dan mengembalikan pesan log jika terdeteksi ancaman.
+        """
+        if getattr(packet, 'tcp', None):
+            return self._process_tcp(packet)
+        elif getattr(packet, 'udp', None):
+            return self._process_udp(packet)
+        return None
+
+    def _process_tcp(self, packet):
         src_ip = packet.src_addr
         dst_port = packet.dst_port
+        tcp_header = packet.tcp  # objek TCPHeader
+        syn = tcp_header.syn
+        ack = tcp_header.ack
+        payload_data = b""
 
-        if dst_port in self.safe_ports:
+        try:
+            if packet.payload:
+                payload_data = bytes(packet.payload)
+        except AttributeError:
+            pass
+
+        # Batasi ukuran payload untuk analisis
+        if len(payload_data) > 4096:
             return None
 
-        # Ambil payload (jika ada)
+        payload_text = payload_data.decode('utf-8', errors='ignore').strip()
+        payload_lower = payload_text.lower()
+
+        # 1. Deteksi port scanning (SYN tanpa ACK ke port yang tidak aman)
+        if syn and not ack and dst_port not in self.safe_ports:
+            category = "SUSPICIOUS"
+            description = f"Pemindaian port (SYN) ke Port {dst_port} dari IP {src_ip}."
+            return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        # 2. Deteksi pada port layanan web/database (SQL injection / XSS)
+        if dst_port in {8080, 8443, 1433, 3306, 5432, 27017}:
+            if any(x in payload_lower for x in self.sql_patterns):
+                category = "MALWARE"
+                description = f"Percobaan injeksi SQL/XSS pada port database/web {dst_port}!"
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+            elif len(payload_text) > 0:
+                category = "SUSPICIOUS"
+                description = f"Permintaan tidak biasa pada port layanan {dst_port}."
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        # 3. Port remote & file sharing
+        if dst_port in {21, 22, 23}:
+            if len(payload_text) > 0 or (syn and not ack):
+                category = "HACKER"
+                description = f"Upaya akses ilegal pada port remote {dst_port}."
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        if dst_port in {135, 137, 139, 445}:
+            # Log jika ada payload atau SYN scan
+            if len(payload_data) > 0 or (syn and not ack):
+                category = "RANSOMWARE"
+                description = "Aktivitas mencurigakan pada port SMB/NetBIOS. Pola penyebaran ransomware!"
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        if dst_port == 3389:
+            if len(payload_data) > 0:
+                category = "HACKER"
+                description = "Upaya pembajakan atau pengintipan layar Windows Remote Desktop."
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        if dst_port == 5900:
+            if len(payload_data) > 0:
+                category = "VIRUS"
+                description = "Upaya akses ilegal ke VNC Remote Control."
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        # 4. Port tinggi (>= 49152) dengan payload berbahaya
+        if dst_port >= 49152:
+            if len(payload_data) > 0 and any(cmd in payload_lower for cmd in self.dangerous_cmds):
+                category = "TROJAN"
+                description = f"Payload perintah shell berbahaya di Port Tinggi {dst_port}!"
+                return self._format_alert(category, src_ip, dst_port, description, payload_text)
+
+        return None
+
+    def _process_udp(self, packet):
+        src_ip = packet.src_addr
+        dst_port = packet.dst_port
         payload_data = b""
         try:
             if packet.payload:
@@ -34,67 +112,21 @@ class SBSHoneypot:
         except AttributeError:
             pass
 
-        # Batasi ukuran payload yang akan dianalisis untuk mencegah beban berlebih
-        if len(payload_data) > 4096:
+        if len(payload_data) > 2048:
             return None
 
         payload_text = payload_data.decode('utf-8', errors='ignore').strip()
         payload_lower = payload_text.lower()
 
-        is_attack = False
-        category = None
-        description = None
+        # Contoh: deteksi DNS tunneling atau payload tidak biasa
+        if dst_port == 53 and len(payload_data) > 0 and any(x in payload_lower for x in ["cmd", "exec", "powershell"]):
+            category = "TROJAN"
+            description = "Kemungkinan DNS tunneling atau eksfiltrasi data."
+            return self._format_alert(category, src_ip, dst_port, description, payload_text)
 
-        # Deteksi pada port tinggi (>=49152): hanya jika payload mengandung kata kunci berbahaya
-        if dst_port >= 49152:
-            if len(payload_data) > 0:
-                # Periksa apakah payload mengandung kata kunci perintah
-                if any(cmd in payload_lower for cmd in self.dangerous_cmds):
-                    category = "TROJAN"
-                    description = f"🚨 TROJAN TERDETEKSI! Payload perintah shell berbahaya di Port Tinggi {dst_port}!"
-                    is_attack = True
-            # Jika tidak mengandung kata kunci, jangan log (mengurangi false positive)
+        return None
 
-        # Deteksi pada port layanan web/database (SQL injection / XSS)
-        elif dst_port in {8080, 8443, 1433, 3306, 5432, 27017}:
-            if any(x in payload_lower for x in self.sql_patterns):
-                category = "MALWARE"
-                description = f"⚠️ Percobaan injeksi SQL/XSS pada port database/web {dst_port}!"
-                is_attack = True
-            elif len(payload_text) > 0:
-                category = "SUSPICIOUS"
-                description = f"Permintaan tidak biasa pada port layanan {dst_port}."
-                is_attack = True
-
-        # Port remote & file sharing
-        elif dst_port in {21, 22, 23}:
-            if len(payload_text) > 0:
-                category = "HACKER"
-                description = f"Upaya pemindaian ilegal pada port remote akses ({dst_port})."
-                is_attack = True
-        elif dst_port in {135, 137, 139, 445}:
-            # Hanya log jika ada payload (meskipun SMB, kita anggap mencurigakan)
-            if len(payload_data) > 0:
-                category = "RANSOMWARE"
-                description = "⚠️ BAHAYA! Aktivitas pemindaian SMB. Pola penyebaran virus Ransomware!"
-                is_attack = True
-            # Jika tidak ada payload, mungkin hanya koneksi SYN, tidak perlu log
-        elif dst_port == 3389:
-            # RDP biasanya tidak membawa payload pada percobaan koneksi awal
-            # Tapi kita log jika ada payload
-            if len(payload_data) > 0:
-                category = "HACKER"
-                description = "Upaya pembajakan atau pengintipan layar Windows Remote Desktop."
-                is_attack = True
-        elif dst_port == 5900:
-            if len(payload_data) > 0:
-                category = "VIRUS"
-                description = "Upaya akses ilegal ke VNC Remote Control."
-                is_attack = True
-
-        if not is_attack:
-            return None
-
+    def _format_alert(self, category, src_ip, dst_port, description, payload_text=""):
         attack_detail = f"[{category}] Dari IP: {src_ip} mengetuk Port: {dst_port} -> Analisis: {description}"
         if payload_text:
             # Potong payload agar log tidak terlalu panjang
