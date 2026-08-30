@@ -7,17 +7,9 @@ class InterceptorWorker(threading.Thread):
         super().__init__()
         self.is_running = True
         self._handle = None
-        # Filter hanya mencakup port kritis yang relevan, tanpa port tinggi acak
-        # Hal ini mengurangi beban dan false positive pada trafik normal.
-        self.filter_rule = (
-            "tcp.DstPort == 21 or tcp.DstPort == 22 or tcp.DstPort == 23 or "
-            "tcp.DstPort == 25 or tcp.DstPort == 110 or tcp.DstPort == 135 or "
-            "tcp.DstPort == 137 or tcp.DstPort == 139 or tcp.DstPort == 143 or "
-            "tcp.DstPort == 445 or tcp.DstPort == 993 or tcp.DstPort == 995 or "
-            "tcp.DstPort == 1433 or tcp.DstPort == 3306 or tcp.DstPort == 3389 or "
-            "tcp.DstPort == 5432 or tcp.DstPort == 5900 or tcp.DstPort == 6379 or "
-            "tcp.DstPort == 8080 or tcp.DstPort == 8443 or tcp.DstPort == 27017"
-        )
+        # Filter semua paket TCP dan UDP untuk analisis menyeluruh
+        # Honeypot akan memutuskan apakah paket mencurigakan.
+        self.filter_rule = "tcp or udp"
         self.honeypot_engine = SBSHoneypot()
         self.log_queue = None
 
@@ -62,7 +54,7 @@ class InterceptorWorker(threading.Thread):
             if self.is_running:
                 err_msg = self.honeypot_engine.process_system_info(f"Terjadi kesalahan sistem: {e}")
                 self.emit_log(f"❌ {err_msg}")
-                self.emit_status("EROR SISTEM", "#EF4444")
+                self.emit_status("ERROR SISTEM", "#EF4444")
         finally:
             self.cleanup()
 
