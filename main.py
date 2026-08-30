@@ -15,7 +15,7 @@ class SBSApp:
     def __init__(self, root):
         self.root = root
         self.root.title("SBS (Side-by-Side) - Enterprise Intrusion Detection System")
-        self.root.geometry("1100x700")  # sedikit lebih besar untuk tabel tambahan
+        self.root.geometry("1100x700")
 
         self.stats = {"HACKER": 0, "RANSOMWARE": 0, "VIRUS": 0, "SUSPICIOUS": 0, "MALWARE": 0, "TROJAN": 0}
         self.worker_thread = None
@@ -125,7 +125,6 @@ class SBSApp:
         self.btn_stop.pack(side='right', fill='x', expand=True, padx=5)
 
     def _is_valid_ip(self, ip):
-        """Validasi IP, mendukung IPv4 dan IPv6"""
         try:
             ipaddress.ip_address(ip)
             return True
@@ -137,19 +136,34 @@ class SBSApp:
         if selected:
             values = self.log_table.item(selected[0], 'values')
             self.selected_ip = values[1]
-            self.btn_isolate.config(state='normal')
-            self.btn_release.config(state='normal')
+            # Aktifkan tombol yang sesuai dengan status IP
+            if self.selected_ip in self.blocked_ips:
+                status = self.blocked_ips[self.selected_ip]["type"]
+                if status == "isolate":
+                    self.btn_isolate.config(state='disabled')
+                    self.btn_release.config(state='normal')
+                    self.btn_block.config(state='normal')  # Bisa juga block dari isolate
+                    self.btn_unblock.config(state='disabled')
+                else:  # block
+                    self.btn_isolate.config(state='normal')
+                    self.btn_release.config(state='disabled')
+                    self.btn_block.config(state='disabled')
+                    self.btn_unblock.config(state='normal')
+            else:
+                self.btn_isolate.config(state='normal')
+                self.btn_release.config(state='disabled')
+                self.btn_block.config(state='normal')
+                self.btn_unblock.config(state='disabled')
             self.btn_check.config(state='normal')
-            self.btn_block.config(state='normal')
-            self.btn_unblock.config(state='normal')
         else:
             self.selected_ip = None
             for btn in [self.btn_isolate, self.btn_release, self.btn_check, self.btn_block, self.btn_unblock]:
                 btn.config(state='disabled')
 
-    def _run_command(self, cmd):
+    def _run_command(self, cmd_args):
+        """Jalankan perintah tanpa shell=True untuk keamanan"""
         try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(cmd_args, capture_output=True, text=True, timeout=10)
             output = result.stdout + result.stderr
             return output.strip() if output else "OK"
         except Exception as e:
@@ -214,13 +228,14 @@ class SBSApp:
             self._update_analytics("❌ IP tidak valid.")
             return
         rule_name = f"SBS_ISOLATE_{ip}"
-        cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
+        cmd = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule_name}", "dir=in", "action=block", f"remoteip={ip}"]
         output = self._run_command(cmd)
         if "OK" in output or "Ok." in output:
             self.blocked_ips[ip] = {"type": "isolate", "rule_name": rule_name, "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             self.update_block_table()
             self._log_action(f"🔒 [ISOLATE] IP {ip} berhasil diisolasi.")
             self._update_analytics(f"🔒 [ISOLATE] IP {ip} berhasil diisolasi.\n{output}")
+            self.on_table_select(None)  # Refresh tombol
         else:
             self._update_analytics(f"❌ [ISOLATE] Gagal: {output}")
 
@@ -232,13 +247,14 @@ class SBSApp:
             self._update_analytics("⚠️ IP ini tidak sedang di-isolate.")
             return
         rule_name = self.blocked_ips[ip]["rule_name"]
-        cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
+        cmd = ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"]
         output = self._run_command(cmd)
         if "OK" in output or "Ok." in output or "No rules match" in output:
             del self.blocked_ips[ip]
             self.update_block_table()
             self._log_action(f"🔓 [RELEASE] IP {ip} dilepas dari isolasi.")
             self._update_analytics(f"🔓 [RELEASE] IP {ip} dilepas.\n{output}")
+            self.on_table_select(None)
         else:
             self._update_analytics(f"❌ [RELEASE] Gagal: {output}")
 
@@ -248,13 +264,14 @@ class SBSApp:
             self._update_analytics("❌ IP tidak valid.")
             return
         rule_name = f"SBS_BLOCK_{ip}"
-        cmd = f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=block remoteip={ip}'
+        cmd = ["netsh", "advfirewall", "firewall", "add", "rule", f"name={rule_name}", "dir=in", "action=block", f"remoteip={ip}"]
         output = self._run_command(cmd)
         if "OK" in output or "Ok." in output:
             self.blocked_ips[ip] = {"type": "block", "rule_name": rule_name, "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             self.update_block_table()
             self._log_action(f"🚫 [BLOCK] IP {ip} berhasil diblokir permanen.")
             self._update_analytics(f"🚫 [BLOCK] IP {ip} diblokir.\n{output}")
+            self.on_table_select(None)
         else:
             self._update_analytics(f"❌ [BLOCK] Gagal: {output}")
 
@@ -266,21 +283,20 @@ class SBSApp:
             self._update_analytics("⚠️ IP ini tidak sedang diblokir.")
             return
         rule_name = self.blocked_ips[ip]["rule_name"]
-        cmd = f'netsh advfirewall firewall delete rule name="{rule_name}"'
+        cmd = ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule_name}"]
         output = self._run_command(cmd)
         if "OK" in output or "Ok." in output or "No rules match" in output:
             del self.blocked_ips[ip]
             self.update_block_table()
             self._log_action(f"✅ [UNBLOCK] IP {ip} dibuka dari blokir.")
             self._update_analytics(f"✅ [UNBLOCK] IP {ip} di-unblock.\n{output}")
+            self.on_table_select(None)
         else:
             self._update_analytics(f"❌ [UNBLOCK] Gagal: {output}")
 
     def update_block_table(self):
-        # Bersihkan tabel
         for item in self.block_table.get_children():
             self.block_table.delete(item)
-        # Tambahkan entri
         for ip, data in self.blocked_ips.items():
             self.block_table.insert("", "end", values=(ip, data["type"], data["time"], data["rule_name"]))
 
@@ -304,6 +320,18 @@ class SBSApp:
         self.root.after(100, self.poll_log_queue)
 
     def append_log(self, text):
+        # Deteksi pesan status
+        if text.startswith("[STATUS]"):
+            parts = text.split("|", 1)
+            if len(parts) == 2:
+                status_text = parts[0].replace("[STATUS] ", "").strip()
+                color = parts[1].strip()
+                self.update_status(status_text, color)
+            # Tampilkan di log monitor (opsional)
+            self.log_monitor.insert('end', text + "\n")
+            self.log_monitor.see('end')
+            return
+
         self.log_monitor.insert('end', text + "\n")
         self.log_monitor.see('end')
 
@@ -312,15 +340,23 @@ class SBSApp:
             try:
                 cleaned_text = text.replace("⚠️ [ALERT] ", "")
 
+                # Ekstraksi kategori dari teks
                 cat_part = "SUSPICIOUS"
-                if "RANSOMWARE" in cleaned_text: cat_part = "RANSOMWARE"
-                elif "HACKER" in cleaned_text: cat_part = "HACKER"
-                elif "VIRUS" in cleaned_text: cat_part = "VIRUS"
-                elif "MALWARE" in cleaned_text: cat_part = "MALWARE"
-                elif "TROJAN" in cleaned_text: cat_part = "TROJAN"
+                for cat in ["RANSOMWARE", "HACKER", "VIRUS", "MALWARE", "TROJAN"]:
+                    if cat in cleaned_text:
+                        cat_part = cat
+                        break
 
-                ip_part = cleaned_text.split("Dari IP:")[1].split("mengetuk Port:")[0].strip()
-                port_part = cleaned_text.split("mengetuk Port:")[1].split("->")[0].strip()
+                # Ekstraksi IP dan Port menggunakan regex yang lebih robust
+                import re
+                ip_match = re.search(r"Dari IP:\s*([\d\.a-fA-F:]+)", cleaned_text)
+                port_match = re.search(r"mengetuk Port:\s*(\d+)", cleaned_text)
+                if ip_match and port_match:
+                    ip_part = ip_match.group(1)
+                    port_part = port_match.group(1)
+                else:
+                    ip_part = "Unknown"
+                    port_part = "0"
 
                 rekomendasi = self.execute_predictive_analytics(cat_part, ip_part, port_part)
                 self.log_table.insert("", "end", values=(timestamp, ip_part, port_part, cat_part, rekomendasi))
@@ -329,8 +365,8 @@ class SBSApp:
                     self.stats[cat_part] = 0
                 self.stats[cat_part] += 1
                 self.update_charts()
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_action(f"Error parsing alert: {e}")
 
     def execute_predictive_analytics(self, category, ip, port):
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
@@ -387,11 +423,16 @@ class SBSApp:
 
     def start_honeypot(self):
         self.log_monitor.insert('end', "[INFO] Menginisialisasi sistem pertahanan terintegrasi dasbor native...\n")
-        self.worker_thread = InterceptorWorker()
-        self.worker_thread.log_queue = self.log_queue
-        self.worker_thread.start()
-        self.btn_start.config(state='disabled')
-        self.btn_stop.config(state='normal')
+        try:
+            self.worker_thread = InterceptorWorker()
+            self.worker_thread.log_queue = self.log_queue
+            self.worker_thread.start()
+            self.update_status("RADAR AKTIF", "#00FF00")
+            self.btn_start.config(state='disabled')
+            self.btn_stop.config(state='normal')
+        except Exception as e:
+            self.update_status("GAGAL START", "#EF4444")
+            self._log_action(f"[ERROR] Gagal menginisialisasi interceptor: {e}")
 
     def stop_honeypot(self):
         if self.worker_thread and self.worker_thread.is_alive():
@@ -400,6 +441,8 @@ class SBSApp:
             self.update_status("RADAR NONAKTIF", "#EF4444")
             self.btn_start.config(state='normal')
             self.btn_stop.config(state='disabled')
+        else:
+            self.update_status("RADAR NONAKTIF", "#EF4444")
 
     def update_status(self, text, color_hex):
         self.status_label.config(text=f"STATUS RADAR: {text}", fg=color_hex)
